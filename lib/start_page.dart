@@ -58,6 +58,10 @@ class StartPage extends StatefulWidget {
 
 
 class _StartPageState extends State<StartPage> {
+  bool isStarted = false;
+  void Start() {
+//fill it
+  }
 
 
 
@@ -147,7 +151,7 @@ class _StartPageState extends State<StartPage> {
         body: Column( children: [
           Container(
             padding: const EdgeInsets.all(5.0),
-            child: Text(exercise, style: const TextStyle(fontSize: 20, color: Colors.green))
+            child: Text(exercise, style: const TextStyle(fontSize: 40, color: Colors.green))
           ),
           Container(
             height: 530,
@@ -163,11 +167,12 @@ class _StartPageState extends State<StartPage> {
               cameraController.takePicture().then((XFile? file) async {
                 File fFile = File(file!.path);
                 final res = await getExercise(fFile, "https://0a82-2a00-a040-19e-7207-f8d5-336b-f473-3e96.eu.ngrok.io/upload");
-                exercise = res.body; exercise = exercise.substring(11); exercise = exercise.substring(0, exercise.length - 2);
+                exercise = res.body; exercise = exercise.substring(14); exercise = exercise.substring(0, exercise.length - 2);
+                print(exercise);
                 setState(() {});
               });
             },
-              child: button(Icons.camera_alt_outlined),
+              child: button(Icons.local_fire_department),
             ),
             GestureDetector(onTap: () {Navigator.of(context).pop();},
               child: button(Icons.home),
@@ -188,7 +193,7 @@ class _StartPageState extends State<StartPage> {
           left: 20,
           bottom: 20,
         ),
-        height: 50,
+        height: 100,
         width: 50,
         decoration: const BoxDecoration(
           shape: BoxShape.circle,
