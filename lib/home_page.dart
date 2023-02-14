@@ -1,7 +1,8 @@
 import 'package:flutter/material.dart';
-import 'package:workout_gui/Arms_page.dart';
+import 'package:workout_gui/arms_page.dart';
 import 'package:workout_gui/legs_page.dart';
-import 'package:workout_gui/Abs_page.dart';
+import 'package:workout_gui/abs_page.dart';
+import 'package:workout_gui/start_page.dart';
 
 class HomePage extends StatelessWidget {
   const HomePage({Key? key}) : super(key: key);
@@ -9,6 +10,20 @@ class HomePage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+        appBar: AppBar(
+          backgroundColor: Colors.transparent,
+          elevation: 0,
+          title: const Text("Tap desired muscle"),
+          flexibleSpace: Container(
+            decoration: const BoxDecoration(
+              gradient: LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  colors: [Color.fromRGBO(1, 220, 198, 0.4),Colors.black54,]
+              ),
+            ),
+          ),
+        ),
       body: SingleChildScrollView(
         child: Stack(
           children: [
@@ -50,6 +65,10 @@ class HomePage extends StatelessWidget {
             ),
           ],
         )
+      ),
+      floatingActionButton: FloatingActionButton(
+        onPressed: (){Navigator.of(context).push(MaterialPageRoute(builder: (BuildContext context){return const StartPage();},));},
+        child: const Icon(Icons.play_arrow, size: 40, color: Colors.black)
       )
     );
   }

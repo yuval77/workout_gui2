@@ -1,18 +1,17 @@
 import 'package:flutter/material.dart';
 import 'package:workout_gui/about_page.dart';
 import 'package:workout_gui/home_page.dart';
-import 'package:workout_gui/start_page.dart';
+//import 'package:permission_handler/permission_handler.dart';
 
-void changeMainPage2(int i){
-  setState(() {
-    currentPage++;
-  });
-}
+void changeMainPage2(int i) {}
 
-void main() {
+
+Future<void> main() async {
   runApp(const MyApp());
-  int currentPage = 0;
-
+  //var status = await Permission.camera.status;
+  //if (status.isDenied) {
+    // We didn't ask for permission yet or the permission has been denied before but not permanently.
+  //}
 }
 
 class MyApp extends StatelessWidget {
@@ -45,37 +44,25 @@ class RootPage extends StatefulWidget {
 class _RootPageState extends State<RootPage> {
   int currentPage = 0;
 
+  void changePageValue(int newPage) {
+    setState(() {
+      currentPage = newPage;
+    });
+  }
+
   List<Widget> pages = const [
     HomePage(),
-    StartPage(),
     AboutPage()
   ];
-
-  void changeMainPage(int i){currentPage = 1;}
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        backgroundColor: Colors.transparent,
-        elevation: 0,
-        title: const Text("Tap desired muscle"),
-        flexibleSpace: Container(
-          decoration: const BoxDecoration(
-            gradient: LinearGradient(
-              begin: Alignment.topCenter,
-              end: Alignment.bottomCenter,
-              colors: [Color.fromRGBO(1, 220, 198, 0.4),Colors.black54,]
-            ),
-          ),
-        ),
-      ),
       body: pages[currentPage],
       bottomNavigationBar: SizedBox(height: 125, child: NavigationBar(
         destinations: const [
-          NavigationDestination(icon: Icon(Icons.home, size: 60), label: 'home'),
-          NavigationDestination(icon: Icon(Icons.play_arrow, size: 60), label: 'Start'),
-          NavigationDestination(icon: Icon(Icons.question_mark, size: 60), label: 'About'),
+          NavigationDestination(icon: Icon(Icons.home, size: 50), label: 'home'),
+          NavigationDestination(icon: Icon(Icons.question_mark, size: 50), label: 'About'),
         ],
         onDestinationSelected: (int index){
           setState(() {
@@ -87,5 +74,8 @@ class _RootPageState extends State<RootPage> {
       )
     );
   }
+
+  void changeMainPage(int i){currentPage = 1;}
+
 }
 

@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
-//import 'package:workout_gui/start_page.dart';
-import 'package:workout_gui/main.dart';
+import 'package:workout_gui/start_page.dart';
 
 class LegsPage extends StatelessWidget {
   const LegsPage({Key? key}) : super(key: key);
@@ -17,20 +16,28 @@ class LegsPage extends StatelessWidget {
           },
           icon: const Icon(Icons.arrow_back_ios))
       ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: (){
-          Navigator.of(context).pop();
-        },
-        child: const Icon(Icons.home)
-      ),
-      body: Column( children: [
+        floatingActionButton: Row(
+          mainAxisAlignment: MainAxisAlignment.end,
+          children: [
+            FloatingActionButton(
+              onPressed: () {Navigator.of(context).pop();},
+              child: const Icon(Icons.home, size: 40, color: Colors.black),
+            ),
+            const SizedBox(width: 265),
+            FloatingActionButton(
+              onPressed: (){Navigator.of(context).push(MaterialPageRoute(builder: (BuildContext context){return const StartPage();},));},
+              child: const Icon(Icons.play_arrow, size: 40, color: Colors.black),
+            ),
+          ],
+        ),
+      body: SingleChildScrollView(child: Column( children: [
         Container(
           margin: const EdgeInsets.all(10.0),
           padding: const EdgeInsets.all(10.0),
           color: Colors.transparent,
           width: double.infinity,
           child: const Center(
-            child: Text('Squats or 90 On Bar',style: TextStyle(color: Colors.tealAccent,fontSize: 30))
+            child: Text('Squats or WallSit',style: TextStyle(color: Colors.tealAccent,fontSize: 30))
           ),
         ),
         Row( children: [
@@ -38,23 +45,20 @@ class LegsPage extends StatelessWidget {
           SizedBox( width: 200.0, height: 250.0, child: Image.asset('images/WallSit.png'),),
         ]),
         Row(
-          mainAxisAlignment: MainAxisAlignment.center, //Center Row contents horizontally,
-          children: const [
-          Icon(Icons.swap_vert, size: 40, color: Colors.tealAccent),
-          SizedBox(height: 70, width: 150),
-          Icon(Icons.swap_vert, size: 40, color: Colors.tealAccent),
-          ]
+            mainAxisAlignment: MainAxisAlignment.center, //Center Row contents horizontally,
+            children: const [
+              Icon(Icons.swap_vert, size: 40, color: Colors.tealAccent),
+              SizedBox(height: 60, width: 150),
+              Icon(Icons.swap_vert, size: 40, color: Colors.tealAccent),
+            ]
         ),
         Row( children: [
           SizedBox( width: 200.0, height: 250.0, child: Image.asset('images/Squat1.png'),),
           SizedBox( width: 200.0, height: 250.0, child: Image.asset('images/Hold_For_As_Long_As_You_Can.png'),),
+
         ]),
-        SizedBox(width: 150.0, height: 50.0, child: ElevatedButton(
-            style: ElevatedButton.styleFrom(backgroundColor: Colors.tealAccent),
-            onPressed: (){Navigator.of(context).pop(); changeMainPage2(1);}, //changeMainPage2(1);main.transfer == 1;
-            child: const Text("Start", style: TextStyle(color: Colors.black,fontSize: 30))
-        )),
+        Container(padding: const EdgeInsets.all(10.0),),
       ])
-    );
+    ));
   }
 }
