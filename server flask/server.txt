@@ -1,0 +1,1189 @@
+# just imports
+import json
+import werkzeug
+from flask import Flask, request, jsonify
+import os
+import csv
+import cv2
+import time
+import h5py
+import imageio
+import numpy as np
+from numpy import asarray
+from PIL import Image
+from sklearn.metrics import confusion_matrix
+from IPython.display import HTML, display, Javascript, Image
+
+# Import tensorflow libraries
+#!pip install -q git+https://github.com/tensorflow/docs
+import tensorflow as tf
+import tensorflow_hub as hub
+from tensorflow_docs.vis import embed
+
+# Import matplotlib libraries
+from matplotlib import pyplot as plt
+from matplotlib.collections import LineCollection
+import matplotlib.patches as patches
+
+# importing movenet lightning , importing movnet requires access to tensorflow's files
+model_name = "movenet_lightning_f16"
+module = hub.load("https://tfhub.dev/google/movenet/singlepose/lightning/4")
+
+# function to make it east to call movenet
+def movenet(input_image):
+    model = module.signatures['serving_default']
+    input_image = tf.cast(input_image, dtype=tf.int32)
+    outputs = model(input_image)
+    keypoints_with_scores = outputs['output_0'].numpy( )
+    return keypoints_with_scores # Output is a [1, 1, 17, 3] np array.
+
+#MoveNet property!!!
+#----------------------------
+#
+#all functions in this cell were not written by me, they are sub functions for the first neural network,
+#movenet. some are also responsable for aesthetics that I don't use any more. for example drawing
+#line like my stickman but on the actual image or on a gif. PAY ATTENTION most code is not used!
+
+# Dictionary that maps from joint names to keypoint indices.
+KEYPOINT_DICT = {
+    'nose': 0,
+    'left_eye': 1,
+    'right_eye': 2,
+    'left_ear': 3,
+    'right_ear': 4,
+    'left_shoulder': 5,
+    'right_shoulder': 6,
+    'left_elbow': 7,
+    'right_elbow': 8,
+    'left_wrist': 9,
+    'right_wrist': 10,
+    'left_hip': 11,
+    'right_hip': 12,
+    'left_knee': 13,
+    'right_knee': 14,
+    'left_ankle': 15,
+    'right_ankle': 16
+}
+# Maps bones to a matplotlib color name.
+KEYPOINT_EDGE_INDS_TO_COLOR = {
+    (0, 1): 'm',
+    (0, 2): 'c',
+    (1, 3): 'm',
+    (2, 4): 'c',
+    (0, 5): 'm',
+    (0, 6): 'c',
+    (5, 7): 'm',
+    (7, 9): 'm',
+    (6, 8): 'c',
+    (8, 10): 'c',
+    (5, 6): 'y',
+    (5, 11): 'm',
+    (6, 12): 'c',
+    (11, 12): 'y',
+    (11, 13): 'm',
+    (13, 15): 'm',
+    (12, 14): 'c',
+    (14, 16): 'c'
+}
+
+def _keypoints_and_edges_for_display(keypoints_with_scores, height, width, keypoint_threshold=0.11):
+    """Returns high confidence keypoints and edges for visualization.
+    Args:
+      keypoints_with_scores: A numpy array with shape [1, 1, 17, 3] representing the keypoint coordinates and scores returned from the MoveNet model.
+      height: height of the image in pixels. width: width of the image in pixels. keypoint_threshold: minimum confidence score for a keypoint to be visualized.
+    Returns:
+      A (keypoints_xy, edges_xy, edge_colors) containing:
+      *the coordinates of all keypoints of all detected entities;
+      *the coordinates of all skeleton edges of all detected entities;
+      *the colors in which the edges should be plotted.
+    """
+    keypoints_all = []
+    keypoint_edges_all = []
+    edge_colors = []
+    num_instances, _, _, _ = keypoints_with_scores.shape
+    for idx in range(num_instances):
+        kpts_x = keypoints_with_scores[0, idx, :, 1]
+        kpts_y = keypoints_with_scores[0, idx, :, 0]
+        kpts_scores = keypoints_with_scores[0, idx, :, 2]
+        kpts_absolute_xy = np.stack(
+            [width * np.array(kpts_x), height * np.array(kpts_y)], axis=-1)
+        kpts_above_thresh_absolute = kpts_absolute_xy[
+                                     kpts_scores > keypoint_threshold, :]
+        keypoints_all.append(kpts_above_thresh_absolute)
+        for edge_pair, color in KEYPOINT_EDGE_INDS_TO_COLOR.items():
+            if (kpts_scores[edge_pair[0]] > keypoint_threshold and
+                    kpts_scores[edge_pair[1]] > keypoint_threshold):
+                x_start = kpts_absolute_xy[edge_pair[0], 0]
+                y_start = kpts_absolute_xy[edge_pair[0], 1]
+                x_end = kpts_absolute_xy[edge_pair[1], 0]
+                y_end = kpts_absolute_xy[edge_pair[1], 1]
+                line_seg = np.array([[x_start, y_start], [x_end, y_end]])
+                keypoint_edges_all.append(line_seg)
+                edge_colors.append(color)
+    if keypoints_all:
+        keypoints_xy = np.concatenate(keypoints_all, axis=0)
+    else:
+        keypoints_xy = np.zeros((0, 17, 2))
+    if keypoint_edges_all:
+        edges_xy = np.stack(keypoint_edges_all, axis=0)
+    else:
+        edges_xy = np.zeros((0, 2, 2))
+    return keypoints_xy, edges_xy, edge_colors
+
+
+def draw_prediction_on_image(
+        image, keypoints_with_scores, crop_region=None, close_figure=False,
+        output_image_height=None):
+    """Draws the keypoint predictions on image.
+    Args:
+      image: A numpy array with shape [height, width, channel] representing the pixel values of the input image.
+      keypoints_with_scores: A numpy array with shape [1, 1, 17, 3] representing
+        the keypoint coordinates and scores returned from the MoveNet model.
+      crop_region: A dictionary that defines the coordinates of the bounding box
+        of the crop region in normalized coordinates (see the init_crop_region
+        function below for more detail). If provided, this function will also
+        draw the bounding box on the image.
+      output_image_height: An integer indicating the height of the output image.
+        Note that the image aspect ratio will be the same as the input image.
+    Returns:
+      A numpy array with shape [out_height, out_width, channel] representing the
+      image overlaid with keypoint predictions.
+    """
+    height, width, channel = image.shape
+    aspect_ratio = float(width) / height
+    fig, ax = plt.subplots(figsize=(12 * aspect_ratio, 12))
+    # To remove the huge white borders
+    fig.tight_layout(pad=0)
+    ax.margins(0)
+    ax.set_yticklabels([])
+    ax.set_xticklabels([])
+    plt.axis('off')
+
+    im = ax.imshow(image)
+    line_segments = LineCollection([], linewidths=(4), linestyle='solid')
+    ax.add_collection(line_segments)
+    # Turn off tick labels
+    scat = ax.scatter([], [], s=60, color='#FF1493', zorder=3)
+
+    (keypoint_locs, keypoint_edges,
+     edge_colors) = _keypoints_and_edges_for_display(
+        keypoints_with_scores, height, width)
+
+    line_segments.set_segments(keypoint_edges)
+    line_segments.set_color(edge_colors)
+    if keypoint_edges.shape[0]:
+        line_segments.set_segments(keypoint_edges)
+        line_segments.set_color(edge_colors)
+    if keypoint_locs.shape[0]:
+        scat.set_offsets(keypoint_locs)
+
+    if crop_region is not None:
+        xmin = max(crop_region['x_min'] * width, 0.0)
+        ymin = max(crop_region['y_min'] * height, 0.0)
+        rec_width = min(crop_region['x_max'], 0.99) * width - xmin
+        rec_height = min(crop_region['y_max'], 0.99) * height - ymin
+        rect = patches.Rectangle(
+            (xmin,ymin),rec_width,rec_height,
+            linewidth=1,edgecolor='b',facecolor='none')
+        ax.add_patch(rect)
+
+    fig.canvas.draw()
+    image_from_plot = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
+    image_from_plot = image_from_plot.reshape(
+        fig.canvas.get_width_height()[::-1] + (3,))
+    plt.close(fig)
+    if output_image_height is not None:
+        output_image_width = int(output_image_height / height * width)
+        image_from_plot = cv2.resize(
+            image_from_plot, dsize=(output_image_width, output_image_height),
+            interpolation=cv2.INTER_CUBIC)
+    return image_from_plot
+
+def to_gif(images, fps):
+    """Converts image sequence (4D numpy array) to gif."""
+    imageio.mimsave('./animation.gif', images, fps=fps)
+    return embed.embed_file('./animation.gif')
+
+def progress(value, max=100):
+    return HTML("""
+      <progress
+          value='{value}'
+          max='{max}',
+          style='width: 100%'
+      >
+          {value}
+      </progress>
+  """.format(value=value, max=max))
+
+    # Confidence score to determine whether a keypoint prediction is reliable.
+MIN_CROP_KEYPOINT_SCORE = 0.2
+
+def init_crop_region(image_height, image_width):
+    """Defines the default crop region.
+    The function provides the initial crop region (pads the full image from both
+    sides to make it a square image) when the algorithm cannot reliably determine
+    the crop region from the previous frame.
+    """
+    if image_width > image_height:
+        box_height = image_width / image_height
+        box_width = 1.0
+        y_min = (image_height / 2 - image_width / 2) / image_height
+        x_min = 0.0
+    else:
+        box_height = 1.0
+        box_width = image_height / image_width
+        y_min = 0.0
+        x_min = (image_width / 2 - image_height / 2) / image_width
+
+    return {
+        'y_min': y_min,
+        'x_min': x_min,
+        'y_max': y_min + box_height,
+        'x_max': x_min + box_width,
+        'height': box_height,
+        'width': box_width
+    }
+
+def torso_visible(keypoints):
+    """Checks whether there are enough torso keypoints.
+    This function checks whether the model is confident at predicting one of the
+    shoulders/hips which is required to determine a good crop region.
+    """
+    return ((keypoints[0, 0, KEYPOINT_DICT['left_hip'], 2] >
+             MIN_CROP_KEYPOINT_SCORE or
+             keypoints[0, 0, KEYPOINT_DICT['right_hip'], 2] >
+             MIN_CROP_KEYPOINT_SCORE) and
+            (keypoints[0, 0, KEYPOINT_DICT['left_shoulder'], 2] >
+             MIN_CROP_KEYPOINT_SCORE or
+             keypoints[0, 0, KEYPOINT_DICT['right_shoulder'], 2] >
+             MIN_CROP_KEYPOINT_SCORE))
+
+def determine_torso_and_body_range(keypoints, target_keypoints, center_y, center_x):
+    """Calculates the maximum distance from each keypoints to the center location.
+    The function returns the maximum distances from the two sets of keypoints:
+    full 17 keypoints and 4 torso keypoints. The returned information will be
+    used to determine the crop size. See determineCropRegion for more detail.
+    """
+    torso_joints = ['left_shoulder', 'right_shoulder', 'left_hip', 'right_hip']
+    max_torso_yrange = 0.0
+    max_torso_xrange = 0.0
+    for joint in torso_joints:
+        dist_y = abs(center_y - target_keypoints[joint][0])
+        dist_x = abs(center_x - target_keypoints[joint][1])
+        if dist_y > max_torso_yrange:
+            max_torso_yrange = dist_y
+        if dist_x > max_torso_xrange:
+            max_torso_xrange = dist_x
+
+    max_body_yrange = 0.0
+    max_body_xrange = 0.0
+    for joint in KEYPOINT_DICT.keys():
+        if keypoints[0, 0, KEYPOINT_DICT[joint], 2] < MIN_CROP_KEYPOINT_SCORE:
+            continue
+        dist_y = abs(center_y - target_keypoints[joint][0]);
+        dist_x = abs(center_x - target_keypoints[joint][1]);
+        if dist_y > max_body_yrange:
+            max_body_yrange = dist_y
+
+        if dist_x > max_body_xrange:
+            max_body_xrange = dist_x
+
+    return [max_torso_yrange, max_torso_xrange, max_body_yrange, max_body_xrange]
+
+def determine_crop_region(keypoints, image_height, image_width):
+    """Determines the region to crop the image for the model to run inference on.
+    The algorithm uses the detected joints from the previous frame to estimate
+    the square region that encloses the full body of the target person and
+    centers at the midpoint of two hip joints. The crop size is determined by
+    the distances between each joints and the center point.
+    When the model is not confident with the four torso joint predictions, the
+    function returns a default crop which is the full image padded to square.
+    """
+    target_keypoints = {}
+    for joint in KEYPOINT_DICT.keys():
+        target_keypoints[joint] = [
+            keypoints[0, 0, KEYPOINT_DICT[joint], 0] * image_height,
+            keypoints[0, 0, KEYPOINT_DICT[joint], 1] * image_width
+        ]
+
+    if torso_visible(keypoints):
+        center_y = (target_keypoints['left_hip'][0] +
+                    target_keypoints['right_hip'][0]) / 2;
+        center_x = (target_keypoints['left_hip'][1] +
+                    target_keypoints['right_hip'][1]) / 2;
+
+        (max_torso_yrange, max_torso_xrange,
+         max_body_yrange, max_body_xrange) = determine_torso_and_body_range(
+            keypoints, target_keypoints, center_y, center_x)
+
+        crop_length_half = np.amax(
+            [max_torso_xrange * 1.9, max_torso_yrange * 1.9,
+             max_body_yrange * 1.2, max_body_xrange * 1.2])
+
+        tmp = np.array(
+            [center_x, image_width - center_x, center_y, image_height - center_y])
+        crop_length_half = np.amin(
+            [crop_length_half, np.amax(tmp)]);
+
+        crop_corner = [center_y - crop_length_half, center_x - crop_length_half];
+
+        if crop_length_half > max(image_width, image_height) / 2:
+            return init_crop_region(image_height, image_width)
+        else:
+            crop_length = crop_length_half * 2;
+            return {
+                'y_min': crop_corner[0] / image_height,
+                'x_min': crop_corner[1] / image_width,
+                'y_max': (crop_corner[0] + crop_length) / image_height,
+                'x_max': (crop_corner[1] + crop_length) / image_width,
+                'height': (crop_corner[0] + crop_length) / image_height -
+                          crop_corner[0] / image_height,
+                'width': (crop_corner[1] + crop_length) / image_width -
+                         crop_corner[1] / image_width
+            }
+    else:
+        return init_crop_region(image_height, image_width)
+
+def crop_and_resize(image, crop_region, crop_size):
+    """Crops and resize the image to prepare for the model input."""
+    boxes=[[crop_region['y_min'], crop_region['x_min'],
+            crop_region['y_max'], crop_region['x_max']]]
+    output_image = tf.image.crop_and_resize(
+        image, box_indices=[0], boxes=boxes, crop_size=crop_size)
+    return output_image
+
+def run_inference(movenet, image, crop_region, crop_size):
+    """Runs model inferece on the cropped region.
+
+    The function runs the model inference on the cropped region and updates the
+    model output to the original image coordinate system.
+    """
+    image_height, image_width, _ = image.shape
+    input_image = crop_and_resize(
+        tf.expand_dims(image, axis=0), crop_region, crop_size=crop_size)
+    # Run model inference.
+    keypoints_with_scores = movenet(input_image)
+    # Update the coordinates.
+    for idx in range(17):
+        keypoints_with_scores[0, 0, idx, 0] = (
+                                                      crop_region['y_min'] * image_height +
+                                                      crop_region['height'] * image_height *
+                                                      keypoints_with_scores[0, 0, idx, 0]) / image_height
+        keypoints_with_scores[0, 0, idx, 1] = (
+                                                      crop_region['x_min'] * image_width +
+                                                      crop_region['width'] * image_width *
+                                                      keypoints_with_scores[0, 0, idx, 1]) / image_width
+    return keypoints_with_scores
+
+
+#stick man
+#-------------
+
+def StickMan(cords):
+    x1, y1 = [cords[4], cords[0]], [cords[5], cords[1]] #[ leftelbow, leftshoulder] left arm
+    x2, y2 = [cords[6], cords[2]], [cords[7], cords[3]] #[ rightelbow, rightshoulder] right arm
+    x3, y3 = [cords[8], cords[4]], [cords[9], cords[5]] #[ lefthand, leftelbow] left forearm
+    x4, y4 = [cords[10], cords[6]], [cords[11], cords[7]] #[ righthand, rightelbow] right forearm
+    x5, y5 = [cords[0], cords[2]], [cords[1], cords[3]] #[ leftshoulder, rightshoulder] chest
+    x6, y6 = [cords[0], cords[12]], [cords[1], cords[13]] #[ leftshoulder, leftass] left body
+    x7, y7 = [cords[2], cords[14]], [cords[3], cords[15]] #[ rightshoulder, rightass] right body
+    x8, y8 = [cords[12], cords[14]], [cords[13], cords[15]] #[ leftass, rightass] ass
+    x9, y9 = [cords[12], cords[16]], [cords[13], cords[17]] #[ leftass, leftknee] left thigh
+    x10, y10 = [cords[14], cords[18]], [cords[15], cords[19]] #[ rightass, rightknee] right thigh
+    x11, y11 = [cords[16], cords[20]], [cords[17], cords[21]] #[ leftknee, leftfoot] left calf
+    x12, y12 = [cords[18], cords[22]], [cords[19], cords[23]] #[ rightknee, rightfoot] right calf
+
+    fig = plt.figure()#make new white board
+    ax = fig.add_subplot(111)#determents dimensions
+    ax.set_aspect('equal', adjustable='box')#determents dimensions
+    plt.axis('off')#delet both axises
+    plt.plot(x1, y1, x2, y2, x3, y3, x4, y4, x5, y5, x6, y6, x7, y7, x8, y8, x9, y9, x10, y10, x11, y11, x12, y12,
+             marker = 'o', color = "black")#drawing the lines
+    plt.show()#print
+
+def GetName(i):# returns the name of the exercise according to the
+    name_arr = ["crunches1", "crunches2", "legs90", "plank", "pull_ups1", "pull_ups2", "push_ups1", "push_ups2", "resting", "squat1", "squat2", "wall_sit"]
+    return name_arr[i]
+
+
+def GetOpposite(i):
+    if(i in [0,4,6,9]):#if first state in exercise (crunches1, pull_ups1, push_ups1, squat1)
+        i += 1#return the state 2 of that exercise
+    return i#else, return itself, so we can check if the user is starting a set or not
+
+# function to convert the JavaScript object into an OpenCV image
+
+
+def Treysar_Array(i):
+    arr = np.zeros((1, 12)) #making a 12 long array contains only 0
+    arr[np.arange(1),i] = 1 #changing the right value from 0 to 1
+    arr = arr.flatten().astype(int).tolist()# flattening cause there is an extra dimesion, changing values from float to int, and to a normal list
+    return arr
+with open('uploadimages\X_train.txt', 'r') as fd:
+    reader = csv.reader(fd)#reding the file
+    for row in reader:#the file is 1 row cause it got flatten
+        X_train = row
+X_train = np.array(X_train).astype(np.float64).reshape((24, 11963))#change values from string to float and reshaping to correct dimension
+
+with open('uploadimages\X_test.txt', 'r') as fd:
+    reader = csv.reader(fd)
+    for row in reader:
+        X_test = row
+X_test = np.array(X_test).astype(np.float64).reshape((24, 629))
+
+with open('uploadimages\Y_train.txt', 'r') as fd:
+    reader = csv.reader(fd)
+    for row in reader:
+        Y_train = row
+Y_train = np.array(Y_train).astype(np.float64).reshape((12, 11963))
+
+with open('uploadimages\Y_test.txt', 'r') as fd:
+    reader = csv.reader(fd)
+    for row in reader:
+        Y_test = row
+Y_test = np.array(Y_test).astype(np.float64).reshape((12, 629))
+
+
+class DLLayer:
+    def __init__(self, name, num_units, input_shape, activation="relu", W_initialization="random", learning_rate=0.01,
+                 optimization=None, regularization=None):
+        # Constant parameters
+        self.name = name
+        self._num_units = num_units
+        self._input_shape = input_shape
+        self._activation = '_'.join(activation.lower().split(' '))
+        self._learning_rate = learning_rate
+        self._optimization = optimization.lower() if optimization else optimization
+        self.alpha = learning_rate
+        self.random_scale = 0.01
+        self.is_train = False
+        self.regularization = regularization.lower() if regularization else optimization
+        self.init_weights(W_initialization)
+
+        # Optimization parameters
+        if self._optimization == "adaptive":
+            self._adaptive_alpha_b = np.full((self._num_units, 1), self.alpha)
+            self._adaptive_alpha_W = np.full((self._num_units, *self._input_shape), self.alpha)
+            self.adaptive_cont = 1.1
+            self.adaptive_switch = -0.5
+
+        elif self._optimization == "adam":
+            self._adam_v_dW = np.zeros(self.W.shape)
+            self._adam_v_db = np.zeros(self.b.shape)
+
+            self._adam_s_dW = np.zeros(self.W.shape)
+            self._adam_s_db = np.zeros(self.b.shape)
+
+            self.adam_beta1 = 0.9
+            self.adam_beta2 = 0.999
+            self.adam_epsilon = np.exp(-8)
+
+        # Activation
+        self.activation_trim = 1e-10
+
+        if self._activation == "sigmoid":
+            self.activation_forward = self._sigmoid
+            self.activation_backward = self._sigmoid_backward
+
+        elif self._activation == "trim_sigmoid":
+            self.activation_forward = self._trim_sigmoid
+            self.activation_backward = self._trim_sigmoid_backward
+
+        elif self._activation == "tanh":
+            self.activation_forward = self._tanh
+            self.activation_backward = self._tanh_backward
+
+        elif self._activation == "trim_tanh":
+            self.activation_forward = self._trim_tanh
+            self.activation_backward = self._trim_tanh_backward
+
+        elif self._activation == "relu":
+            self.activation_forward = self._relu
+            self.activation_backward = self._relu_backward
+
+        elif self._activation == "leaky_relu":
+            self.leaky_relu_d = 0.01
+            self.activation_forward = self._leaky_relu
+            self.activation_backward = self._leaky_relu_backward
+
+        elif self._activation == "softmax":
+            self.activation_forward = self._softmax
+            self.activation_backward = self._softmax_backward
+
+        elif self._activation == "trim_softmax":
+            self.activation_forward = self._trim_softmax
+            self.activation_backward = self._softmax_backward
+
+        elif self._activation == "no_activation":
+            self.activation_forward = self._no_activation
+            self.activation_backward = self._no_activation_backward
+
+        # Regularization parameters
+        if self.regularization == 'l2':
+            self.L2_lambda = 0.6
+        elif self.regularization == 'dropout':
+            self.dropout_keep_prob = 0.6
+
+    def init_weights(self, W_initialization):
+        self.b = np.zeros((self._num_units, 1), dtype=float)
+
+        if W_initialization.lower() == "zeros":
+            self.W = np.full(*self._get_W_shape(), self.alpha)
+        elif W_initialization.lower() == "random":
+            self.W = np.random.randn(*self._get_W_shape()) * self.random_scale
+        elif W_initialization.lower() == "xavier":
+            self.W = np.random.randn(*self._get_W_shape()) * np.sqrt(1 / self._get_W_init_factor())
+        elif W_initialization.lower() == "he":
+            self.W = np.random.randn(*self._get_W_shape()) * np.sqrt(2 / self._get_W_init_factor())
+        else:
+            try:
+                with h5py.File(W_initialization, 'r') as hf:
+                    self.W = hf['W'][:]
+                    self.b = hf['b'][:]
+            except FileNotFoundError:
+                raise NotImplementedError("Unrecognized initialization:", W_initialization)
+
+    def _get_W_init_factor(self):
+        return np.sum(self._input_shape)
+
+    def _get_W_shape(self):
+        return (self._num_units, *self._input_shape)
+
+    def _sigmoid(self, Z):
+        return 1 / (1 + np.exp(-Z))
+
+    def _sigmoid_backward(self, dA):
+        A = self._sigmoid(self._Z)
+        return dA * A * (1 - A)
+
+    def _trim_sigmoid(self, Z):
+        with np.errstate(over='raise', divide='raise'):
+            try:
+                A = 1 / (1 + np.exp(-Z))
+            except FloatingPointError:
+                Z = np.where(Z < -100, -100, Z)
+                A = A = 1 / (1 + np.exp(-Z))
+            TRIM = self.activation_trim
+            if TRIM > 0:
+                A = np.where(A < TRIM, TRIM, A)
+                A = np.where(A > 1 - TRIM, 1 - TRIM, A)
+            return A
+
+    def _trim_sigmoid_backward(self, dA):
+        A = self._trim_sigmoid(self._Z)
+
+        return dA * A * (1 - A)
+
+    def _tanh(self, Z):
+        return np.tanh(Z)
+
+    def _tanh_backward(self, dA):
+        A = self._tanh(self._Z)
+        return dA * (1 - A ** 2)
+
+    def _trim_tanh(self, Z):
+        A = np.tanh(Z)
+        TRIM = self.activation_trim
+        if TRIM > 0:
+            A = np.where(A < -1 + TRIM, TRIM, A)
+            A = np.where(A > 1 - TRIM, 1 - TRIM, A)
+        return A
+
+    def _trim_tanh_backward(self, dA):
+        A = self._trim_tanh(self._Z)
+
+        return dA * (1 - A ** 2)
+
+    def _relu(self, Z):
+        return np.maximum(0, Z)
+
+    def _relu_backward(self, dA):
+        return np.where(self._Z <= 0, 0, dA)
+
+    def _leaky_relu(self, Z):
+        return np.where(Z <= 0, Z * self.leaky_relu_d, Z)
+
+    def _leaky_relu_backward(self, dA):
+        return np.where(self._Z <= 0, dA * self.leaky_relu_d, dA)
+
+    def _softmax(self, Z):
+        return np.exp(Z) / np.sum(np.exp(Z), axis=0)
+
+    def _softmax_backward(self, dZ):
+        return dZ
+
+    def _trim_softmax(self, Z):
+        with np.errstate(over='raise', divide='raise'):
+            try:
+                eZ = np.exp(Z)
+            except FloatingPointError:
+                Z = np.where(Z > 100, 100, Z)
+                eZ = np.exp(Z)
+        A = eZ / np.sum(eZ, axis=0)
+        return A
+
+    def _no_activation(self, Z):
+        return Z
+
+    def _no_activation_backward(self, dZ):
+        return dZ
+
+    def forward_dropout(self, A_prev):
+        if self.is_train and self.regularization == 'dropout':
+            self._D = np.random.rand(*A_prev.shape)
+            self._D = np.where(self._D < self.dropout_keep_prob, 1, 0)
+            A_prev *= self._D
+            A_prev /= self.dropout_keep_prob
+        return np.array(A_prev, copy=True)
+
+    def forward_propagation(self, A_prev):
+        self._A_prev = self.forward_dropout(A_prev)
+        self._Z = np.dot(self.W, A_prev) + self.b
+        A = self.activation_forward(self._Z)
+
+        return A
+
+    def backward_dropout(self, dA_prev):
+        if self.regularization == 'dropout':
+            dA_prev *= self._D
+            dA_prev /= self.dropout_keep_prob
+        return dA_prev
+
+    def backward_l2(self, dZ):
+        m = dZ.shape[-1]
+
+        if self.regularization == 'l2':
+            return self.dW + ((self.L2_lambda * self.W) / m)
+        return self.dW
+
+    def backward_propagation(self, dA):
+        dZ = self.activation_backward(dA)
+        m = self._A_prev.shape[1]
+
+        eps = np.exp(-10)
+        m = np.where(m == 0, eps, m)  # to avoid divide by zero
+
+        self.dW = (1.0 / m) * np.dot(dZ, self._A_prev.T)
+        self.dW = self.backward_l2(dZ)
+
+        self.db = (1.0 / m) * np.sum(dZ, axis=1, keepdims=True)
+
+        dA_Prev = np.dot(self.W.T, dZ)
+        dA_Prev = self.backward_dropout(dA_Prev)
+
+        return dA_Prev
+
+    def update_parameters(self, t):
+        if self._optimization is None:
+            self.W -= self.dW * self.alpha
+            self.b -= self.db * self.alpha
+
+        elif self._optimization == "adaptive":
+            self._adaptive_alpha_W *= np.where(self._adaptive_alpha_W * self.dW > 0, self.adaptive_cont,
+                                               self.adaptive_switch)
+            self._adaptive_alpha_b *= np.where(self._adaptive_alpha_b * self.db > 0, self.adaptive_cont,
+                                               self.adaptive_switch)
+            self.W -= self._adaptive_alpha_W
+            self.b -= self._adaptive_alpha_b
+
+        elif self._optimization == "adam":
+            self._adam_v_dW = self.adam_beta1 * self._adam_v_dW + ((1 - self.adam_beta1) * self.dW)
+            adam_v_dW_A = self._adam_v_dW / (1 - (self.adam_beta1 ** t))
+
+            self._adam_v_db = self.adam_beta1 * self._adam_v_db + ((1 - self.adam_beta1) * self.db)
+            adam_v_db_A = self._adam_v_db / (1 - (self.adam_beta1 ** t))
+
+            self._adam_s_dW = self.adam_beta2 * self._adam_s_dW + (1 - self.adam_beta2) * (self.dW ** 2)
+            adam_s_dW_A = self._adam_s_dW / (1 - (self.adam_beta2 ** t))
+
+            self._adam_s_db = self.adam_beta2 * self._adam_s_db + (1 - self.adam_beta2) * (self.db ** 2)
+            adam_s_db_A = self._adam_s_db / (1 - (self.adam_beta2 ** t))
+
+            self.W -= (self.alpha * adam_v_dW_A) / (np.sqrt(adam_s_dW_A + self.adam_epsilon))
+            self.b -= (self.alpha * adam_v_db_A) / (np.sqrt(adam_s_db_A + self.adam_epsilon))
+
+    def save_weights(self, path, file_name):
+        if not os.path.exists(path):
+            os.makedirs(path)
+
+        with h5py.File(f"{path}/{file_name}.h5", 'w') as hf:
+            hf.create_dataset('W', data=self.W)
+            hf.create_dataset('b', data=self.b)
+
+    def set_train(self, is_train):
+        self.is_train = is_train
+
+    def __str__(self):
+        s = self.name + " Layer:\n"
+        s += "\tnum_units: " + str(self._num_units) + "\n"
+
+        if self._activation != 'noactivation':
+            s += "\tactivation: " + self._activation + "\n"
+
+        if self._activation == "leaky_relu":
+            s += "\t\tleaky relu parameters:\n"
+            s += "\t\t\tleaky_relu_d: " + str(self.leaky_relu_d) + "\n"
+
+        s += "\tinput_shape: " + str(self._input_shape) + "\n"
+        s += "\tlearning_rate (alpha): " + str(self.alpha) + "\n"
+
+        # optimization
+        if self._optimization == "adaptive":
+            s += "\t\tadaptive parameters:\n"
+            s += "\t\t\tcont: " + str(self.adaptive_cont) + "\n"
+            s += "\t\t\tswitch: " + str(self.adaptive_switch) + "\n"
+        elif self._optimization == "adam":
+            s += "\t\tadam parameters:\n"
+            s += "\t\t\tbeta1: " + str(self.adam_beta1) + "\n"
+            s += "\t\t\tbeta2: " + str(self.adam_beta2) + "\n"
+            s += "\t\t\tepsilon: " + str(self.adam_epsilon) + "\n"
+
+        # regularization
+        if self.regularization == 'l2':
+            s += "\tregularization: L2\n"
+            s += "\t\tL2 parameters:\n"
+            s += "\t\t\tlambda: " + str(self.L2_lambda) + "\n"
+
+        if self.regularization == 'dropout':
+            s += "\tregularization: dropout\n"
+            s += "\t\tDropout parameters:\n"
+            s += "\t\t\tkeep prob: " + str(self.dropout_keep_prob) + "\n"
+
+        # parameters
+        s += "\tparameters:\n\t\tweights shape: " + str(self.W.shape) + "\n"
+        s += "\t\tb shape: " + str(self.b.shape) + "\n"
+
+        return s
+class DLConv(DLLayer):
+    def __init__(self, name, num_filters, input_shape, filter_size, strides, padding, activation="relu",
+                 W_initialization="He", learning_rate=0.01, optimization="adam", regularization=None):
+        self.num_filters = num_filters
+        self._input_shape = input_shape
+        self.filter_size = filter_size
+        self.strides = strides
+        self.padding = padding if not isinstance(padding, str) else padding.lower()
+
+        if self.padding == 'same':
+            padding_h = (strides[0] * self._input_shape[1] - strides[0] - self._input_shape[1] + self.filter_size[
+                0] + 1) // 2
+            padding_w = (strides[1] * self._input_shape[2] - strides[1] - self._input_shape[2] + self.filter_size[
+                0] + 1) // 2
+            self.padding = (padding_w, padding_h)
+        elif self.padding == 'valid':
+            self.padding = (0, 0)
+        else:
+            self.padding = padding
+
+        self.h_out = int(((self._input_shape[1] + 2 * self.padding[0] - filter_size[0]) // strides[0]) + 1)
+        self.w_out = int(((self._input_shape[2] + 2 * self.padding[1] - filter_size[1]) // strides[1]) + 1)
+
+        super().__init__(name, num_filters, input_shape, activation, W_initialization, learning_rate,
+                         optimization, regularization)
+
+    def _get_W_shape(self):
+        return self._num_units, self._input_shape[0], self.filter_size[0], self.filter_size[1]
+
+    def _get_W_init_factor(self):
+        return self._input_shape[0] * self.filter_size[0] * self.filter_size[1]
+
+    @staticmethod
+    def im2col_indices(A, filter_size=(3, 3), padding=(1, 1), stride=(1, 1)):
+        """ An implementation of im2col based on some fancy indexing """
+        # Zero-pad the input
+        A_padded = np.pad(A, ((0, 0), (0, 0), (padding[0], padding[1]), (padding[0], padding[1])), mode='constant',
+                          constant_values=(0, 0))
+
+        k, i, j = DLConv.get_im2col_indices(A.shape, filter_size, padding, stride)
+
+        cols = A_padded[:, k, i, j]
+        C = A.shape[1]
+        cols = cols.transpose(1, 2, 0).reshape(filter_size[0] * filter_size[1] * C, -1)
+        return cols
+
+    @staticmethod
+    def get_im2col_indices(A_shape, filter_size=(3, 3), padding=(1, 1), stride=(1, 1)):
+        # First figure out what the size of the output should be
+        m, C, H, W = A_shape
+        out_height = int((H + 2 * padding[0] - filter_size[0]) / stride[0]) + 1
+        out_width = int((W + 2 * padding[1] - filter_size[1]) / stride[1]) + 1
+
+        i0 = np.repeat(np.arange(filter_size[0]), filter_size[1])
+        i0 = np.tile(i0, C)
+        i1 = stride[0] * np.repeat(np.arange(out_height), out_width)
+        j0 = np.tile(np.arange(filter_size[1]), filter_size[0] * C)
+        j1 = stride[1] * np.tile(np.arange(out_width), out_height)
+        i = i0.reshape(-1, 1) + i1.reshape(1, -1)
+        j = j0.reshape(-1, 1) + j1.reshape(1, -1)
+        k = np.repeat(np.arange(C), filter_size[0] * filter_size[1]).reshape(-1, 1)
+
+        return k, i, j
+
+    @staticmethod
+    def col2im_indices(cols, A_shape, filter_size=(3, 3), padding=(1, 1), stride=(1, 1)):
+        """ An implementation of col2im based on fancy indexing and np.add.at """
+        m, C, H, W = A_shape
+        H_padded, W_padded = H + 2 * padding[0], W + 2 * padding[1]
+        A_padded = np.zeros((m, C, H_padded, W_padded), dtype=cols.dtype)
+        k, i, j = DLConv.get_im2col_indices(A_shape, filter_size, padding, stride)
+
+        cols_reshaped = cols.reshape(C * filter_size[0] * filter_size[1], -1, m)
+
+        cols_reshaped = cols_reshaped.transpose(2, 0, 1)
+
+        np.add.at(A_padded, (slice(None), k, i, j), cols_reshaped)
+
+        if padding[0] == 0 and padding[1] == 0:
+            return A_padded
+        if padding[0] == 0:
+            return A_padded[:, :, :, padding[1]:-padding[1]]
+        if padding[1] == 0:
+            return A_padded[:, :, padding[0]:-padding[0], :]
+        return A_padded[:, :, padding[0]:-padding[0], padding[1]:-padding[1]]
+class DLMaxPooling:
+    def __init__(self, name, input_shape, filter_size, strides):
+        self._name = name
+        self._input_shape = input_shape
+        self._filter_size = filter_size
+        self._strides = strides
+
+        self.h_out = int((input_shape[1] - self._filter_size[0]) / self._strides[0]) + 1
+        self.w_out = int((input_shape[2] - self._filter_size[1]) / self._strides[1]) + 1
+
+    def forward_propagation(self, A_prev):
+        # first transpose A_prev from (C,H,W,m) to (m,C,H,W)
+        A_prev = A_prev.transpose(3, 0, 1, 2)
+        m, C, H, W = A_prev.shape
+        prev_A = A_prev.reshape(m * C, 1, H, W)
+
+        self.A_prev = DLConv.im2col_indices(prev_A, self._filter_size, padding=(0, 0), stride=self._strides)
+        self.max_indexes = np.argmax(self.A_prev, axis=0)
+
+        Z = self.A_prev[self.max_indexes, range(self.max_indexes.size)]
+        Z = Z.reshape(self.h_out, self.w_out, m, C).transpose(3, 0, 1, 2)
+
+        return Z
+
+    def backward_propagation(self, dZ):
+        dA_prev = np.zeros_like(self.A_prev)
+
+        # transpose dZ from C,h,W,C to H,W,m,c and flatten it
+        # Then, insert dZ values to dA_prev in the places of the max indexes
+        dZ_flat = dZ.transpose(1, 2, 3, 0).ravel()
+        dA_prev[self.max_indexes, range(self.max_indexes.size)] = dZ_flat
+
+        # get the original prev_A structure from col2im
+        m = dZ.shape[-1]
+        C, H, W = self._input_shape
+        shape = (m * C, 1, H, W)
+        dA_prev = DLConv.col2im_indices(dA_prev, shape, self._filter_size, padding=(0, 0), stride=self._strides)
+        dA_prev = dA_prev.reshape(m, C, H, W).transpose(1, 2, 3, 0)
+        return dA_prev
+
+    def update_parameters(self):
+        return
+
+    def __str__(self):
+        s = f"Maxpooling {self._name} Layer:\n"
+        s += f"\tinput_shape: {self._input_shape}\n"
+        s += "\tMaxpooling parameters:\n"
+        s += f"\t\tfilter size: {self._filter_size}\n"
+        s += f"\t\tstrides: {self._strides}\n"
+
+        # number of output channels == number of input channels
+        s += f"\t\toutput shape: {(self._input_shape[0], self.h_out, self.w_out)}\n"
+
+        return s
+class DLFlatten:
+    def __init__(self, name, input_shape):
+        self._name = name
+        self._input_shape = input_shape
+
+    @staticmethod
+    def forward_propagation(self, prev_A):
+        m = prev_A.shape[-1]
+        A = np.copy(prev_A.reshape(-1, m))
+
+        return A
+
+    @staticmethod
+    def backward_propagation(self, dA):
+        m = dA.shape[-1]
+        dA_prev = np.copy(dA.reshape(*self._input_shape, m))
+
+        return dA_prev
+
+    def update_parameters(self):
+        return
+
+    def __str__(self):
+        s = f"Flatten {self._name} Layer:\n"
+        s += f"\tinput_shape: {self._input_shape}\n"
+
+        return s
+class DLModel:
+    def __init__(self, name="Model"):
+        self.name = name
+        self.layers = [None]
+        self._is_compiled = False
+        self.is_train = False
+        self.inject_str_func = None
+
+    def add(self, layer):
+        self.layers.append(layer)
+
+    def _squared_means(self, AL, Y):
+        return (AL - Y) ** 2
+
+    def _squared_means_backward(self, AL, Y):
+        return 2 * (AL - Y)
+
+    def _cross_entropy(self, AL, Y):
+        eps = np.exp(-10)
+        AL = np.where(AL == 0, eps, AL)
+        AL = np.where(AL == 1, 1 - eps, AL)
+
+        error = np.where(Y == 0, -np.log(1 - AL), -np.log(AL))
+        return error
+
+    def _cross_entropy_backward(self, AL, Y):
+        eps = np.exp(-10)
+        AL = np.where(AL == 0, eps, AL)
+        AL = np.where(AL == 1, 1 - eps, AL)
+
+        dAL = np.where(Y == 0, 1 / (1 - AL), -1 / AL)
+        return dAL
+
+    def _categorical_cross_entropy(self, AL, Y):
+        errors = np.where(Y == 1, -np.log(AL), 0)
+        return errors
+
+    def _categorical_cross_entropy_backward(self, AL, Y):
+        dA = AL - Y
+        return dA
+
+    def compile(self, loss, threshold=0.5):
+        self.threshold = threshold
+        self.loss = '_'.join(loss.lower().split(' '))
+
+        if loss == "squared_means":
+            self.loss_forward = self._squared_means
+            self.loss_backward = self._squared_means_backward
+        elif loss == "categorical_cross_entropy":
+            self.loss_forward = self._categorical_cross_entropy
+            self.loss_backward = self._categorical_cross_entropy_backward
+        elif loss == "cross_entropy":
+            self.loss_forward = self._cross_entropy
+            self.loss_backward = self._cross_entropy_backward
+
+        self._is_compiled = True
+
+    def regularization_cost(self, m):
+        costs = 0
+        L2_lambda = 0
+
+        for i in range(1, len(self.layers)):
+            layer = self.layers[i]
+            if layer.regularization == 'l2':
+                L2_lambda = layer.L2_lambda
+                costs += np.sum(np.square(layer.W))
+        return (L2_lambda * costs) / (2 * m)
+
+    def compute_cost(self, AL, Y):
+        m = AL.shape[1]
+        errors = self.loss_forward(AL, Y)
+
+        return (np.sum(errors) / m) + self.regularization_cost(m)
+
+    def forward_propagation(self, X):
+        L = len(self.layers)
+        for l in range(1, L):
+            X = self.layers[l].forward_propagation(X)
+        return X
+
+    def backward_propagation(self, Al, Y):
+        L = len(self.layers)
+        dAl_t = self.loss_backward(Al, Y)
+
+        for l in reversed(range(1, L)):
+            dAl_t = self.layers[l].backward_propagation(dAl_t)
+            self.layers[l].update_parameters(self._t)
+        return dAl_t
+
+    def set_train(self, is_train):
+        self.is_train = is_train
+
+        for i in range(1, len(self.layers)):
+            self.layers[i].set_train(is_train)
+
+    def train(self, X, Y, num_epochs, mini_batch_size):
+        self.set_train(True)
+        print_ind = max(num_epochs // 100, 1)
+        costs = []
+        seed = 10
+
+        for i in range(num_epochs):
+            self._t = 1
+
+            Al = np.array(X, copy=True)
+
+            mini_batches = self.random_mini_batches(X, Y, mini_batch_size, seed)
+            seed += 1
+
+            printed_this_batch = False
+            for mini_batch in mini_batches:
+                if len(mini_batch[0][0]) == 0:
+                    continue
+
+                Al = self.forward_propagation(mini_batch[0])
+                dAl = self.backward_propagation(Al, mini_batch[1])
+
+                # record progress
+                if (100 * i / num_epochs) % 10 == 0:
+                    J = self.compute_cost(Al, mini_batch[1])
+                    costs.append(J)
+                    inject_string = ""
+                    if self.inject_str_func is not None:
+                        inject_string = self.inject_str_func(self, X, Y, Al)
+                    if printed_this_batch == False:
+                        print(f"cost after {i} full updates {100 * i / num_epochs}%:{J}" + inject_string)
+                        printed_this_batch = True
+
+
+        self.set_train(False)
+        return costs
+
+    def random_mini_batches(self, X, Y, mini_batch_size=64, seed=0):
+        np.random.seed(seed)
+
+        m = X.shape[1]
+
+        permutation = list(np.random.permutation(m))
+
+        shuffled_X = X[:, permutation]
+        shuffled_Y = Y[:, permutation].reshape((-1, m))
+        num_complete_minibatches = m // mini_batch_size
+
+        mini_batches = []
+
+        for k in range(num_complete_minibatches + 1):
+            mini_batch_X = shuffled_X[:, mini_batch_size * k: (k + 1) * mini_batch_size]
+            mini_batch_Y = shuffled_Y[:, mini_batch_size * k: (k + 1) * mini_batch_size]
+            mini_batch = (mini_batch_X, mini_batch_Y)
+            mini_batches.append(mini_batch)
+            if (k == num_complete_minibatches + 1) and ((m / mini_batch_size) != num_complete_minibatches):
+                mini_batch_X = shuffled_X[:, (k + 1) * mini_batch_size:]
+                mini_batch_Y = shuffled_Y[:, (k + 1) * mini_batch_size:]
+                mini_batch = (mini_batch_X, mini_batch_Y)
+                mini_batches.append(mini_batch)
+
+        return mini_batches
+
+    def predict(self, X):
+        Al = X
+        L = len(self.layers)
+        for i in range(1, L):
+            Al = self.layers[i].forward_propagation(Al)
+
+        if Al.shape[0] > 1:
+            return np.where(Al == Al.max(axis=0), 1, 0)
+        return Al > self.threshold
+
+    def confusion_matrix(self, X, Y):
+        AL = self.predict(X)
+        predictions = np.argmax(AL, axis=0)
+        labels = np.argmax(Y, axis=0)
+
+        return confusion_matrix(predictions, labels)
+
+    def save_weights(self, path):
+        if not os.path.exists(path):
+            os.makedirs(path)
+
+        for i in range(1, len(self.layers)):
+            self.layers[i].save_weights(path, f"Layer{i}")
+
+    def __str__(self):
+        s = self.name + " description:\n\tnum_layers: " + str(len(self.layers) - 1) + "\n"
+
+        if self._is_compiled:
+            s += "\tCompilation parameters:\n"
+            s += "\t\tprediction threshold: " + str(self.threshold) + "\n"
+            s += "\t\tloss function: " + self.loss + "\n\n"
+
+        for i in range(1, len(self.layers)):
+            s += "\tLayer " + str(i) + ":" + str(self.layers[i]) + "\n"
+
+        return s
+
+
+layer1 = DLLayer("layer1", 48, (24,), "leaky_relu", W_initialization = "he", optimization="adam")#making layers
+layer2 = DLLayer("layer2", 96, (48,), "leaky_relu", W_initialization = "he", optimization="adam")
+softmax_layer = DLLayer("Softmax 3", 12, (96,), "softmax", W_initialization = "he", optimization="adam")
+model = DLModel()
+model.add(layer1)#adding layers
+model.add(layer2)
+model.add(softmax_layer)
+model.compile("categorical_cross_entropy")#compiling layers
+
+costs = model.train(X_train, Y_train, 100, mini_batch_size=64)#trainng
+#plt.plot(costs)
+#plt.show()
+
+#--train results
+predictions = model.predict(X_train)
+print("train accuracy: %", np.sum(Y_train.argmax(axis=0) == predictions.argmax(axis=0)) / 119.63 )
+#print(model.confusion_matrix(X_train, Y_train))
+
+#--test results
+predictions = model.predict(X_test)
+print("test accuracy: %", np.sum(Y_test.argmax(axis=0) == predictions.argmax(axis=0)) / 6.29 )
+#print(model.confusion_matrix(X_test, Y_test))
+
+def predict_exercise(image):
+    #image = tf.io.read_file(image_path)
+    image = tf.image.decode_jpeg(image)
+    input_image = tf.expand_dims(image, axis=0)
+    input_image = tf.image.resize_with_pad(input_image, 192, 192) # Input image size is 192x192
+    keypoints_with_scores = movenet(input_image).flatten()
+
+    #key points regularizations
+    keypoints = []
+    for i in range(51):
+        if i > 14 and i % 3 == 0:
+            keypoints.append(0 + keypoints_with_scores[i+1])
+        if i > 14 and i % 3 == 1:
+            keypoints.append(1 - keypoints_with_scores[i-1])
+    new_keypoints = [keypoints]
+
+    #predictions
+    predictions = model.predict(np.array(new_keypoints).T)
+    exercise_num = predictions.argmax(axis=0)[0]
+    return GetName(exercise_num)
+    #StickMan(keypoints)
+
+imageT = tf.io.read_file("uploadimages\GigaChad.jpg")
+print(predict_exercise(imageT))
+
+
+
+
+app = Flask(__name__)
+@app.route("/upload", methods=["POST"])
+
+def index():
+    imagefile = request.files["image"]
+    filename = werkzeug.utils.secure_filename(imagefile.filename)
+    print("\nReceived image File name : " + imagefile.filename)
+    imagefile.save("uploadimages/" + filename)
+    image_path = "uploadimages/" + filename
+    image = tf.io.read_file(str(image_path))
+    exercise = "exercise"
+
+    try: exercise = predict_exercise(image)
+    except: 1==2
+
+    print("exercise detected: " + str(exercise))
+    return json.dumps({"exercise": exercise})
+
+if __name__ =="__main__":
+    app.run(debug = True, port= 4000)
