@@ -2,15 +2,18 @@
 
 workout with gui
 
-## Getting Started
+## setup
 
-This project is a starting point for a Flutter application.
+You need to open two projects, one for the server folder and one for everything else.
+Also you need to download ngrok for running the server.
 
-A few resources to get you started if this is your first Flutter project:
+In the server project you need to:
+Run main.py
+Open ngrok cmd and type ngrok http 4000
+Then copy the link after the word forwwarding
+paste it in the workout_gui/lib/start_page- line 158 instead of the existing url.
+Add "/upload" in the end of the pasted url.
+Then, run the app! (I recommend in an emulator)
 
-- [Lab: Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Cookbook: Useful Flutter samples](https://docs.flutter.dev/cookbook)
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+
