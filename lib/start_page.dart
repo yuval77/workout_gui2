@@ -58,7 +58,28 @@ class StartPage extends StatefulWidget {
 
 
 class _StartPageState extends State<StartPage> {
-
+  Widget button(IconData icon) {
+    return Align(
+      child: Container(
+        margin: const EdgeInsets.only(
+          left: 20,
+          bottom: 20,
+        ),
+        height: 80,
+        width: 50,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: isStarted ? Colors.orange : Colors.tealAccent,
+          boxShadow: const [BoxShadow(color: Colors.black26,offset: Offset(2, 2),blurRadius: 10,),],
+        ),
+        child: Center(
+          child: Icon( icon,
+            color: (isStarted && icon == Icons.home) ? Colors.grey : Colors.black,
+          ),
+        ),
+      ),
+    );
+  }
 
 
   //camera
@@ -143,17 +164,24 @@ class _StartPageState extends State<StartPage> {
     });
     await Future.delayed(const Duration(milliseconds: 750));
   }}
-  void _toggleLoop() { setState(() {isStarted = !isStarted;});
-    if (isStarted) {_startLoop();}
-    else {sumUpText = sumUp(listSum);} }
-  String sumUp(List<String> list) {
+  void _toggleLoop() {
+    setState(() {
+      isStarted = !isStarted;
+    });
+    if (isStarted) {
+      _startLoop();
+    }
+    //else {sumUpText = sumUp(listSum);}
+  }
+    String sumUp(List<String> list) {
       int current = 8; // starting in resting
       int count = 0; // how many reps have been made
       int errorCount = 0; // if there is a lot of good recognition and just one bad won't stop the workout
 
       String outputF = "Let's sum up: ";
       List<String> improve = []; // all notes to get better
-      List<String> summary = []; // will have all counts of reps and time of exercises
+      List<String> summary = [
+      ]; // will have all counts of reps and time of exercises
       Map<int, int> dynamicControl1 = {
         0: 1,
         4: 5,
@@ -187,10 +215,12 @@ class _StartPageState extends State<StartPage> {
         "wall_sit"];
 
 
-      for(int i = 0; i < 12; i++) {
-      for (int j = 0; j < 12; j++) {
-        if (nameArr[j] == list[i]){exerciseNum = j;}}
-
+      for (int i = 0; i < 12; i++) {
+        for (int j = 0; j < 12; j++) {
+          if (nameArr[j] == list[i]) {
+            exerciseNum = j;
+          }
+        }
 
 
         // state rest
@@ -216,7 +246,7 @@ class _StartPageState extends State<StartPage> {
         // state dynamic exercise pos1
         else if ([0, 4, 6, 9].contains(current)) {
           if (current == exerciseNum) {
-              // continue same exercise
+            // continue same exercise
             errorCount = 0;
             dynamic_count1 += 1;
           } else if (current == dynamicControl2[exerciseNum]) {
@@ -240,8 +270,6 @@ class _StartPageState extends State<StartPage> {
             }
           }
         }
-
-
 
 
         // state dynamic exercise pos2
@@ -273,7 +301,6 @@ class _StartPageState extends State<StartPage> {
         }
 
 
-
         // state static exercise
         else if ([2, 3, 11].contains(current)) {
           if (current == exerciseNum) {
@@ -294,90 +321,78 @@ class _StartPageState extends State<StartPage> {
             }
           }
         }
-
-
-
-
-
-
-
       }
-    for (var i = 0; i < summary.length; i++) {output += "${summary[i]}, ";}
-    output += "           And this is how you can improve: ";
-    for (var i = 0; i < improve.length; i++) {output += "${improve[i]}, ";}
-    return outputF;
-  }
+      for (var i = 0; i < summary.length; i++) {
+        output += "${summary[i]}, ";
+      }
+      output += "           And this is how you can improve: ";
+      for (var i = 0; i < improve.length; i++) {
+        output += "${improve[i]}, ";
+      }
+      return outputF;
+    }
 
 
-
-  //main shit
-  @override
-  Widget build(BuildContext context) {
-    if(cameraController.value.isInitialized) {
-      return Scaffold(
-        appBar: AppBar(
-          backgroundColor: Colors.transparent,
-          elevation: 0,
-          title: const Text("Start"),
-          flexibleSpace: Container(
-            decoration: const BoxDecoration(
-              gradient: LinearGradient(
-                  begin: Alignment.topCenter,
-                  end: Alignment.bottomCenter,
-                  colors: [Color.fromRGBO(1, 220, 198, 0.4),Colors.black54,]
+    //main shit
+    @override
+    Widget build(BuildContext context) {
+      if (cameraController.value.isInitialized) {
+        return Scaffold(
+            appBar: AppBar(
+              backgroundColor: Colors.transparent,
+              elevation: 0,
+              title: const Text("Start"),
+              flexibleSpace: Container(
+                decoration: const BoxDecoration(
+                  gradient: LinearGradient(
+                      begin: Alignment.topCenter,
+                      end: Alignment.bottomCenter,
+                      colors: [
+                        Color.fromRGBO(1, 220, 198, 0.4),
+                        Colors.black54,
+                      ]
+                  ),
+                ),
               ),
             ),
-          ),
-        ),
-        body: SingleChildScrollView( child: Column( children: [
-          Container(
-            padding: const EdgeInsets.all(5.0),
-            child: Text(isStarted ? exercise : "Start already!", style: const TextStyle(fontSize: 40, color: Colors.tealAccent))
-          ),
-          Container(
-            height: 530,
-            padding: const EdgeInsets.only(top: 20, left: 50, bottom: 10, right: 50),
-            child: CameraPreview(cameraController),
-          ),
+            body: SingleChildScrollView(child: Column(children: [
+              Container(
+                  padding: const EdgeInsets.all(5.0),
+                  child: Text(isStarted ? exercise : "Start already!",
+                      style: const TextStyle(
+                          fontSize: 40, color: Colors.tealAccent))
+              ),
+              Container(
+                height: 530,
+                padding: const EdgeInsets.only(
+                    top: 20, left: 50, bottom: 10, right: 50),
+                child: CameraPreview(cameraController),
+              ),
 
-          Row( mainAxisAlignment: MainAxisAlignment.center, children: [
-            GestureDetector(onTap: () {setState(() {direction = direction == 0 ? 1 : 0;startCamera(direction);});},
-              child: button(Icons.flip_camera_ios_outlined),),
-            GestureDetector(onTap: _toggleLoop,child: button(Icons.local_fire_department)),
-            GestureDetector(onTap: () {(isStarted == false) ? Navigator.of(context).pop() : (isStarted = true);}, child: button(Icons.home))
-          ]),
+              Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                GestureDetector(onTap: () {
+                  setState(() {
+                    direction = direction == 0 ? 1 : 0;
+                    startCamera(direction);
+                  });
+                },
+                  child: button(Icons.flip_camera_ios_outlined),),
+                GestureDetector(onTap: _toggleLoop,
+                    child: button(Icons.local_fire_department)),
+                GestureDetector(onTap: () {
+                  (isStarted == false) ? Navigator.of(context).pop() : (
+                      isStarted = true);
+                }, child: button(Icons.home))
+              ]),
 
-          Container(
-              padding: const EdgeInsets.all(5.0),
-              child: Text(isStarted ? exercise : "Start already!", style: const TextStyle(fontSize: 20, color: Colors.teal))
-          )
-      ])));
-    } else {return const SizedBox();}
-  }
-
-
-
-  //all buttons
-  Widget button(IconData icon) {
-    return Align(
-      child: Container(
-        margin: const EdgeInsets.only(
-          left: 20,
-          bottom: 20,
-        ),
-        height: 80,
-        width: 50,
-        decoration: BoxDecoration(
-          shape: BoxShape.circle,
-          color: isStarted ? Colors.orange : Colors.tealAccent,
-          boxShadow: const [BoxShadow(color: Colors.black26,offset: Offset(2, 2),blurRadius: 10,),],
-        ),
-        child: Center(
-          child: Icon( icon,
-            color: (isStarted && icon == Icons.home) ? Colors.grey : Colors.black,
-          ),
-        ),
-      ),
-    );
-  }
+              Container(
+                  padding: const EdgeInsets.all(5.0),
+                  child: Text(isStarted ? exercise : "Start already!",
+                      style: const TextStyle(fontSize: 20, color: Colors.teal))
+              )
+            ])));
+      } else {
+        return const SizedBox();
+      }
+    }
 }
